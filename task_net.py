@@ -14,5 +14,5 @@ class TaskNet(nn.Module):
 
     def forward(self, x_graph, x_feat):
         embedding = self.gnn(x_graph, x_feat)
-        label_preds = torch.sigmoid(self.label_proj(embedding)).squeeze()
+        label_preds = torch.sigmoid(self.label_proj(embedding))
         return label_preds, embedding

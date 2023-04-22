@@ -9,33 +9,51 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import numpy as np
 import dgl
+import wandb
+from torch.utils.data import DataLoader
+
+LR = 0.0001
+frac_train = 0.7
+frac_val = 0.1
+h_feats  = 32
+hidden_dim = 100
+n_epochs = 1000
+overfit = 100000
+batch_size = 32
+
+def collate(samples):
+    # The input `samples` is a list of pairs
+    #  (graph, label).
+    graphs, labels = map(list, zip(*samples))
+    batched_graph = dgl.batch(graphs)
+    return batched_graph, torch.tensor(np.array(labels))
+
+def make_pred(graph, model):
+    features = graph.ndata['h']
+    pred, _ = model(graph, features)
+    return pred
+
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    frac_train = 0.7
-    frac_val = 0.1
+
 
     full_dataset = LeffingwellDataset()
     split_fracs = [frac_train, frac_val, 1 - frac_train - frac_val]
     train_data, val_data, test_data = dgl.data.utils.split_dataset(full_dataset, split_fracs)
+
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True,
+                         collate_fn=collate)
+    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=True,
+                         collate_fn=collate)
     node_feat_length = full_dataset.NODE_FEAT_LENGTH
     n_labels = full_dataset.N_LABELS
 
 
-    def make_pred(graph, model):
-        features = graph.ndata['h']
-        pred, _ = model(graph, features)
-        return pred
-
-
-    hidden_dim = 100
-    #gcn_direct = GCN_direct(in_feats=node_feat_length, h_feats=32, mlp_dim=hidden_dim, n_gcn_layers=3, n_mlp_layers=2, gcn_activation=F.leaky_relu, num_classes=n_labels)
-    #gcn_direct = gcn_direct.to(device)
-    gcn = GCN(in_feats=node_feat_length, h_feats=32, mlp_dim=hidden_dim, n_gcn_layers=3, n_mlp_layers=2, gcn_activation=F.leaky_relu)
+    gcn = GCN(in_feats=node_feat_length, h_feats=h_feats, mlp_dim=hidden_dim, n_gcn_layers=3, n_mlp_layers=2, gcn_activation=F.leaky_relu)
     task_net = TaskNet(n_labels=n_labels, hidden_dim=hidden_dim, gnn=gcn)
     task_net = task_net.to(device)
 
-    #make_pred(example_graph, gcn_direct)
     epoch = 0
     statistics = {
         'train_unweighted_bce': [],
@@ -50,15 +68,12 @@ def main():
     # Note: an untrained model will have a loss of about 0.69 on average
     # Trivial model of prediction all 0s will have a loss of 4.42 on average
     # Using a model seems to rapidly get to 0.12 loss on average
-    LR = 0.0001
 
     optimizer = torch.optim.Adam(task_net.parameters(), lr=LR, weight_decay=5e-4)
-    n_epochs = 1000
 
     weighted_loss_fcn = nn.BCELoss(weight = torch.Tensor(full_dataset.label_weights).to(device), reduction='sum')
     unweighted_loss_fcn = nn.BCELoss(reduction='mean')
-    overfit = 100000
-    n_train_graphs = min(len(train_data), overfit)
+    n_train_graphs = min(len(train_loader), overfit)
     epoch_iter = tqdm(range(n_epochs))
 
 
@@ -79,7 +94,7 @@ def main():
             'val_micro_auroc': 0,
             'epoch': epoch
         }
-        for i, (cid, graph, labels) in enumerate(train_data):
+        for i, (graph, labels) in enumerate(train_loader):
             if i > overfit:
                 continue
             optimizer.zero_grad()
@@ -108,7 +123,7 @@ def main():
             task_net.eval()
             all_val_preds = []
             all_val_labels = []
-            for cid, graph, labels in val_data:
+            for graph, labels in val_loader:
                 graph = graph.to(device)
                 pred = make_pred(graph, task_net)            
                 #dataset_iter.set_postfix(loss=loss.item())

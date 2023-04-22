@@ -54,7 +54,7 @@ class LeffingwellDataset(DGLDataset):
         return label_weights
 
     def __getitem__(self, i):
-        return self.cids[i], self.graphs[i], self.labels[i]
+        return self.graphs[i], self.labels[i]
     
     def __len__(self):
         return len(self.graphs)
