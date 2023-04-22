@@ -11,15 +11,20 @@ import numpy as np
 import dgl
 import wandb
 from torch.utils.data import DataLoader
+import hydra
+from omegaconf import DictConfig, OmegaConf
 
-LR = 0.0001
-frac_train = 0.7
-frac_val = 0.1
-h_feats  = 32
-hidden_dim = 100
-n_epochs = 1000
-overfit = 100000
-batch_size = 32
+def setup_wandb(cfg):
+    config_dict = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
+    kwargs = {'project': cfg.wandb.project, 'entity': cfg.wandb.entity,
+             'config': config_dict,
+              'settings': wandb.Settings(_disable_stats=True),
+              'reinit': True,
+              'mode': cfg.wandb.mode}
+    wandb.init(**kwargs)
+    wandb.save('*.txt')
+    return cfg
+
 
 def collate(samples):
     # The input `samples` is a list of pairs
@@ -33,53 +38,46 @@ def make_pred(graph, model):
     pred, _ = model(graph, features)
     return pred
 
-
-def main():
+@hydra.main(config_path='configs/', config_name='config')
+def main(cfg: DictConfig):
+    cfg = setup_wandb(cfg)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
     full_dataset = LeffingwellDataset()
-    split_fracs = [frac_train, frac_val, 1 - frac_train - frac_val]
+    split_fracs = [cfg.dataset.frac_train, cfg.dataset.frac_val, 1 - cfg.dataset.frac_train - cfg.dataset.frac_val]
     train_data, val_data, test_data = dgl.data.utils.split_dataset(full_dataset, split_fracs)
 
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True,
+    train_loader = DataLoader(train_data, batch_size=cfg.dataset.batch_size, shuffle=True,
                          collate_fn=collate)
-    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=True,
+    val_loader = DataLoader(val_data, batch_size=cfg.dataset.batch_size, shuffle=True,
                          collate_fn=collate)
     node_feat_length = full_dataset.NODE_FEAT_LENGTH
     n_labels = full_dataset.N_LABELS
 
 
-    gcn = GCN(in_feats=node_feat_length, h_feats=h_feats, mlp_dim=hidden_dim, n_gcn_layers=3, n_mlp_layers=2, gcn_activation=F.leaky_relu)
-    task_net = TaskNet(n_labels=n_labels, hidden_dim=hidden_dim, gnn=gcn)
+    gcn = GCN(in_feats=node_feat_length, h_feats=cfg.model.h_feats, mlp_dim=cfg.model.hidden_dim, n_gcn_layers=3, n_mlp_layers=2, gcn_activation=F.leaky_relu)
+    task_net = TaskNet(n_labels=n_labels, hidden_dim=cfg.model.hidden_dim, gnn=gcn)
     task_net = task_net.to(device)
 
     epoch = 0
-    statistics = {
-        'train_unweighted_bce': [],
-        'train_weighted_bce': [],
-        'train_macro_auroc': [],
-        'train_micro_auroc': [],
-        'val_macro_auroc': [],
-        'val_micro_auroc': [],
-        'epoch': []
-    }
 
     # Note: an untrained model will have a loss of about 0.69 on average
     # Trivial model of prediction all 0s will have a loss of 4.42 on average
     # Using a model seems to rapidly get to 0.12 loss on average
 
-    optimizer = torch.optim.Adam(task_net.parameters(), lr=LR, weight_decay=5e-4)
+    optimizer = torch.optim.Adam(task_net.parameters(), lr=cfg.training.lr, weight_decay=cfg.training.weight_decay)
 
     weighted_loss_fcn = nn.BCELoss(weight = torch.Tensor(full_dataset.label_weights).to(device), reduction='sum')
     unweighted_loss_fcn = nn.BCELoss(reduction='mean')
-    n_train_graphs = min(len(train_loader), overfit)
-    epoch_iter = tqdm(range(n_epochs))
+    if cfg.training.overfit == 0:
+        n_train_graphs = len(train_loader)
+    else:
+        n_train_graphs = cfg.training.overfit
+    epoch_iter = tqdm(range(cfg.training.epochs))
 
 
     for epoch_i in epoch_iter:
-        #print("Epoch {}".format(epoch))
-        #dataset_iter = tqdm(dataset[:overfit])
         unweighted_bce_sum = 0
         weighted_bce_sum = 0
         all_train_preds = []
@@ -95,7 +93,7 @@ def main():
             'epoch': epoch
         }
         for i, (graph, labels) in enumerate(train_loader):
-            if i > overfit:
+            if cfg.training.overfit > 0 and i > cfg.training.overfit:
                 continue
             optimizer.zero_grad()
             task_net.train()
@@ -108,7 +106,10 @@ def main():
             weighted_bce = weighted_loss_fcn(pred, labels_tensor)
             weighted_bce_sum += weighted_bce.item()
 
-            loss  = weighted_bce
+            if cfg.training.weighted_loss:
+                loss  = weighted_bce
+            else:
+                loss = unweighted_bce
             loss.backward()
             #print(task_net.gnn.mlp[0].weight.grad.norm())
 
@@ -130,6 +131,7 @@ def main():
                 all_val_preds.append(pred.detach().cpu().numpy())
                 all_val_labels.append(labels)
 
+        
         epoch_stats['train_weighted_bce'] = weighted_bce_sum / n_train_graphs
         epoch_stats['train_unweighted_bce'] = unweighted_bce_sum / n_train_graphs
         all_train_preds_tensor = torch.tensor(np.vstack(all_train_preds))
@@ -142,9 +144,8 @@ def main():
         epoch_stats['val_macro_auroc']  = torchmetrics.functional.auroc(all_val_preds_tensor, all_val_labels_tensor, task='multilabel', average='macro', num_labels=113).item()
         epoch_stats['val_micro_auroc']  = torchmetrics.functional.auroc(all_val_preds_tensor, all_val_labels_tensor, task='multilabel', average='micro', num_labels=113).item()
 
+        wandb.log(epoch_stats)
         epoch_iter.set_postfix(**epoch_stats)
-        for key, value in epoch_stats.items():
-            statistics[key].append(value)
         epoch += 1
 
 if __name__ == "__main__":

@@ -1,0 +1,22 @@
+wandb:
+  project: seal_scent
+  entity: danieltlevy
+  mode: online
+
+training:
+  lr: 1e-4
+  weight_decay: 5e-4
+  epochs: 500
+  val_every: 1
+  debug: False
+  overfit: 0
+  weighted_loss: True
+
+model:
+  h_feats: 32
+  hidden_dim: 100
+
+dataset:
+  frac_train: 0.7
+  frac_val: 0.1
+  batch_size: 32
