@@ -75,10 +75,8 @@ def main(cfg: DictConfig):
     energy_loss_fcn = NCELoss(K=cfg.model.K)
     task_loss_fcn = SealTaskLoss(lam=cfg.model.lam, weighted=True, label_weights=full_dataset.label_weights)
 
-    if cfg.training.overfit == 0:
-        n_train_graphs = len(train_loader)
-    else:
-        n_train_graphs = cfg.training.overfit
+    n_train_batches = len(train_loader)
+    n_val_batches = len(val_loader)
     epoch_iter = tqdm(range(cfg.training.epochs))
 
 
@@ -87,16 +85,18 @@ def main(cfg: DictConfig):
         all_train_labels = []
 
         epoch_stats = {
-            'train_unweighted_bce': 0,
-            'train_weighted_bce': 0,
-            'train_macro_auroc': 0,
-            'train_micro_auroc': 0,
-            'val_macro_auroc': 0,
-            'val_micro_auroc': 0,
-            'energy': 0,
             'epoch': epoch_i,
-            'task_loss': 0,
-            'energy_loss': 0
+            'train/unweighted_bce': 0,
+            'train/weighted_bce': 0,
+            'train/macro_auroc': 0,
+            'train/micro_auroc': 0,
+            'train/mean_energy': 0,
+            'train/task_loss': 0,
+            'train/energy_loss': 0,
+            'val/macro_auroc': 0,
+            'val/micro_auroc': 0,
+            'val/energy_loss': 0,
+            'val/mean_energy': 0,
         }
         for i, (graph, labels) in enumerate(train_loader):
             if cfg.training.overfit > 0 and i > cfg.training.overfit:
@@ -105,7 +105,6 @@ def main(cfg: DictConfig):
             graph_feats = graph.ndata['h']
             labels =  labels.float().to(device)
             batch_size = graph.batch_size
-
 
             ############################
             # Update the task model
@@ -122,17 +121,17 @@ def main(cfg: DictConfig):
             pred, embeddings = task_net(graph, graph_feats)
             # Compute energy
             energy = energy_net(embeddings, labels)
-            epoch_stats['energy'] += energy.sum().item()
+            epoch_stats['train/mean_energy'] += energy.mean().item()
             # Compute task loss
             task_net_loss = task_loss_fcn(pred, labels, energy).mean()
             task_net_loss.backward()
-            epoch_stats['task_loss'] += task_net_loss.item()*batch_size
+            epoch_stats['train/task_loss'] += task_net_loss.item()
             optimizer_task.step()
             # Compute weighted and unweighted BCE
-            unweighted_bce = task_loss_fcn.unweighted_bce(pred, labels).sum()
-            weighted_bce = task_loss_fcn.weighted_bce(pred, labels).sum()
-            epoch_stats['train_unweighted_bce'] += unweighted_bce.item()
-            epoch_stats['train_weighted_bce'] += weighted_bce.item()
+            unweighted_bce = task_loss_fcn.unweighted_bce(pred, labels).mean()
+            weighted_bce = task_loss_fcn.weighted_bce(pred, labels).mean()
+            epoch_stats['train/unweighted_bce'] += unweighted_bce.item()
+            epoch_stats['train/weighted_bce'] += weighted_bce.item()
 
             all_train_preds.append(pred.detach().cpu().numpy())
             all_train_labels.append(labels.long().detach().cpu().numpy())
@@ -156,37 +155,47 @@ def main(cfg: DictConfig):
                 energy_net_loss = energy_loss_fcn(pred, embeddings, energy_net, labels).mean()
                 energy_net_loss.backward()
                 optimizer_energy.step()
-                epoch_stats['energy_loss'] += energy_net_loss.item()*batch_size
+                epoch_stats['train/energy_loss'] += energy_net_loss.item()
                     
 
 
         # validation loop
         with torch.no_grad():
             task_net.eval()
+            energy_net.eval()
             all_val_preds = []
             all_val_labels = []
             for graph, labels in val_loader:
                 graph = graph.to(device)
-                pred = make_pred(graph, task_net)            
+                graph_feats = graph.ndata['h']
+                labels = labels.float().to(device)
+                pred, embeddings = task_net(graph, graph_feats)
+                energy = energy_net(embeddings, labels)
+                epoch_stats['val/mean_energy'] += energy.mean().item()
+                energy_net_loss = energy_loss_fcn(pred, embeddings, energy_net, labels).mean()
+                epoch_stats['val/energy_loss'] += energy_net_loss.item()
+
                 #dataset_iter.set_postfix(loss=loss.item())
                 all_val_preds.append(pred.detach().cpu().numpy())
-                all_val_labels.append(labels.long().numpy())
+                all_val_labels.append(labels.cpu().long().numpy())
 
         # Normalize epoch stats
-        epoch_stats['energy'] = epoch_stats['energy'] / n_train_graphs
-        epoch_stats['energy_loss'] = epoch_stats['energy_loss'] / n_train_graphs
-        epoch_stats['task_loss'] = epoch_stats['task_loss'] / n_train_graphs
-        epoch_stats['train_weighted_bce'] =  epoch_stats['train_weighted_bce'] / n_train_graphs
-        epoch_stats['train_unweighted_bce'] = epoch_stats['train_unweighted_bce'] / n_train_graphs
+        epoch_stats['train/mean_energy'] = epoch_stats['train/mean_energy'] / n_train_batches
+        epoch_stats['train/energy_loss'] = epoch_stats['train/energy_loss'] / n_train_batches
+        epoch_stats['train/task_loss'] = epoch_stats['train/task_loss'] / n_train_batches
+        epoch_stats['train/weighted_bce'] =  epoch_stats['train/weighted_bce'] / n_train_batches
+        epoch_stats['train/unweighted_bce'] = epoch_stats['train/unweighted_bce'] / n_train_batches
         all_train_preds_tensor = torch.tensor(np.vstack(all_train_preds))
         all_train_labels_tensor = torch.tensor(np.vstack(all_train_labels))
-        epoch_stats['train_macro_auroc']  = torchmetrics.functional.auroc(all_train_preds_tensor, all_train_labels_tensor, task='multilabel', average='macro', num_labels=113).item()
-        epoch_stats['train_micro_auroc']  = torchmetrics.functional.auroc(all_train_preds_tensor, all_train_labels_tensor, task='multilabel', average='micro', num_labels=113).item()
+        epoch_stats['train/macro_auroc']  = torchmetrics.functional.auroc(all_train_preds_tensor, all_train_labels_tensor, task='multilabel', average='macro', num_labels=113).item()
+        epoch_stats['train/micro_auroc']  = torchmetrics.functional.auroc(all_train_preds_tensor, all_train_labels_tensor, task='multilabel', average='micro', num_labels=113).item()
         
         all_val_preds_tensor = torch.tensor(np.vstack(all_val_preds))
         all_val_labels_tensor = torch.tensor(np.vstack(all_val_labels))
-        epoch_stats['val_macro_auroc']  = torchmetrics.functional.auroc(all_val_preds_tensor, all_val_labels_tensor, task='multilabel', average='macro', num_labels=113).item()
-        epoch_stats['val_micro_auroc']  = torchmetrics.functional.auroc(all_val_preds_tensor, all_val_labels_tensor, task='multilabel', average='micro', num_labels=113).item()
+        epoch_stats['val/macro_auroc']  = torchmetrics.functional.auroc(all_val_preds_tensor, all_val_labels_tensor, task='multilabel', average='macro', num_labels=113).item()
+        epoch_stats['val/micro_auroc']  = torchmetrics.functional.auroc(all_val_preds_tensor, all_val_labels_tensor, task='multilabel', average='micro', num_labels=113).item()
+        epoch_stats['val/energy_loss'] = epoch_stats['val/energy_loss'] / n_val_batches
+        epoch_stats['val/mean_energy'] = epoch_stats['val/mean_energy'] / n_val_batches
 
         wandb.log(epoch_stats)
         epoch_iter.set_postfix(**epoch_stats)
