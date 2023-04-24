@@ -4,7 +4,7 @@ from torch import nn
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 eps = 1e-8
 def score(energy, pred_probs):
-    return -energy - torch.sum(torch.log(pred_probs + eps))
+    return -energy - torch.sum(torch.log(pred_probs + eps), dim=-1, keepdim=True)
 
 def sample(probs, K):
     '''

@@ -20,12 +20,7 @@ class EnergyModel(nn.Module):
     
     def forward(self, embeddings, y):
         global_e = self.global_func(F.softplus(self.global_proj(y)))
-        local_e = torch.sum(y * self.label_proj(embeddings))
+        local_e = torch.sum(y * self.label_proj(embeddings), dim=-1, keepdim=True)
         return global_e + self.lam*local_e
 
-    #def forward(self, x_graph, x_feat, y):
-    #    global_e = self.global_func(F.softplus(self.global_proj(y)))
-    #    local_e = torch.sum(y * self.label_proj(self.gnn(x_graph, x_feat).squeeze()))
-    #    return global_e + self.lam*local_e
-    
 
