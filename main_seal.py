@@ -91,12 +91,16 @@ def main(cfg: DictConfig):
             'train/macro_auroc': 0,
             'train/micro_auroc': 0,
             'train/mean_energy': 0,
+            'train/mean_pred_energy': 0,
             'train/task_loss': 0,
             'train/energy_loss': 0,
+            'train/abs_energy_gap': 0,
             'val/macro_auroc': 0,
             'val/micro_auroc': 0,
             'val/energy_loss': 0,
             'val/mean_energy': 0,
+            'val/mean_pred_energy': 0,
+            'val/abs_energy_gap': 0,
         }
         for i, (graph, labels) in enumerate(train_loader):
             if cfg.training.overfit > 0 and i > cfg.training.overfit:
@@ -119,11 +123,15 @@ def main(cfg: DictConfig):
                 param.requires_grad = True
             # Get predictions and embeddings
             pred, embeddings = task_net(graph, graph_feats)
-            # Compute energy
+            # Compute predicted energy
+            pred_energy = energy_net(embeddings, pred)
+            epoch_stats['train/mean_pred_energy'] += pred_energy.mean().item()
+            # Compute true energy
             energy = energy_net(embeddings, labels)
             epoch_stats['train/mean_energy'] += energy.mean().item()
+            epoch_stats['train/abs_energy_gap'] += abs(epoch_stats['train/mean_energy'] - epoch_stats['train/mean_pred_energy'])
             # Compute task loss
-            task_net_loss = task_loss_fcn(pred, labels, energy).mean()
+            task_net_loss = task_loss_fcn(pred, labels, pred_energy).mean()
             task_net_loss.backward()
             epoch_stats['train/task_loss'] += task_net_loss.item()
             optimizer_task.step()
@@ -170,8 +178,11 @@ def main(cfg: DictConfig):
                 graph_feats = graph.ndata['h']
                 labels = labels.float().to(device)
                 pred, embeddings = task_net(graph, graph_feats)
+                pred_energy = energy_net(embeddings, pred)
                 energy = energy_net(embeddings, labels)
+                epoch_stats['val/mean_pred_energy'] += pred_energy.mean().item()
                 epoch_stats['val/mean_energy'] += energy.mean().item()
+                epoch_stats['val/abs_energy_gap'] = abs(epoch_stats['val/mean_energy'] - epoch_stats['val/mean_pred_energy'])
                 energy_net_loss = energy_loss_fcn(pred, embeddings, energy_net, labels).mean()
                 epoch_stats['val/energy_loss'] += energy_net_loss.item()
 
@@ -181,6 +192,8 @@ def main(cfg: DictConfig):
 
         # Normalize epoch stats
         epoch_stats['train/mean_energy'] = epoch_stats['train/mean_energy'] / n_train_batches
+        epoch_stats['train/mean_pred_energy'] = epoch_stats['train/mean_pred_energy'] / n_train_batches
+        epoch_stats['train/abs_energy_gap'] = epoch_stats['train/abs_energy_gap'] / n_train_batches
         epoch_stats['train/energy_loss'] = epoch_stats['train/energy_loss'] / n_train_batches
         epoch_stats['train/task_loss'] = epoch_stats['train/task_loss'] / n_train_batches
         epoch_stats['train/weighted_bce'] =  epoch_stats['train/weighted_bce'] / n_train_batches
