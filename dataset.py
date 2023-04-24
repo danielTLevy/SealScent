@@ -51,6 +51,7 @@ class LeffingwellDataset(DGLDataset):
         all_number_of_labels = [len(x) for x in all_nonzeros]
         label_counts, _ = np.histogram(all_label_numbers, bins=113, range=(0,113))
         label_weights = 1/label_counts
+        label_weights = label_weights/np.sum(label_weights)
         return label_weights
 
     def __getitem__(self, i):

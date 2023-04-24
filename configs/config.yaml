@@ -15,6 +15,15 @@ training:
 model:
   h_feats: 32
   hidden_dim: 100
+  K: 20
+  lam: 0.01
+  shared_gnn: True
+  gnn_layers: 3
+  gnn_mlp_layers: 2
+  energy_global_dim: 128
+  energy_global_local: 1
+  use_energy: True
+
 
 dataset:
   frac_train: 0.7
