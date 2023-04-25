@@ -31,19 +31,15 @@ class NCELoss(nn.Module):
          # Compute true energy
         if embeddings is None:
             # Calculate embeddings
-            energy = energy_model(x_graph, x_feat, y)
-        else:
-            energy = energy_model(embeddings, y)
+            embeddings = energy_model.get_embeddings(x_graph, x_feat)
+        energy = energy_model.forward_embeddings(embeddings, y)
+        
         # Compute the true score
         true_score = score(energy, pred_probs)
         # Get samples
         sample_scores = []
         for y_hat in sample(pred_probs, self.K):
-            if embeddings is None:
-                # TODO: maybe should compute embeddings just once if this is too slow
-                sample_energy = energy_model(x_graph, x_feat, y_hat)
-            else:
-                sample_energy = energy_model(embeddings, y_hat)
+            sample_energy = energy_model.forward_embeddings(embeddings, y_hat)
             sample_score = score(sample_energy, pred_probs)
             sample_scores.append(sample_score)
         sample_scores = torch.stack(sample_scores)

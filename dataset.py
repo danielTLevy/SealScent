@@ -46,8 +46,8 @@ class LeffingwellDataset(DGLDataset):
     ATOM_TYPES = ['H', 'C', 'S', 'N', 'O']
     BOND_TYPES = [Chem.rdchem.BondType.SINGLE, Chem.rdchem.BondType.DOUBLE,
                     Chem.rdchem.BondType.TRIPLE, Chem.rdchem.BondType.AROMATIC]
-    N_RANDOM_FEATURES = 5
-    NODE_FEAT_LENGTH = 11
+    N_RANDOM_FEATURES = 0
+    NODE_FEAT_LENGTH = len(ATOM_TYPES) + N_RANDOM_FEATURES + 1
     EDGE_FEAT_LENGTH = 4
     N_LABELS = 112
 

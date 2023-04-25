@@ -1,9 +1,9 @@
 import torch
 from dataset import LeffingwellDataset
-from energy_net import EnergyModel, DummyEnergy, EnergyModelEmbeddings
+from energy_net import EnergyModel, DummyEnergy
 from task_net import TaskNet
 from loss_functions import NCELoss, SealTaskLoss
-from gnn import GCN
+from gnn import GCN, GCNGlobalNorm
 import torchmetrics
 from torch import nn
 import torch.nn.functional as F
@@ -57,13 +57,13 @@ def main(cfg: DictConfig):
     n_labels = full_dataset.N_LABELS
     
 
-    gnn_model = GCN
+    gnn_model = GCNGlobalNorm
     gnn_params = {
         'in_feats': node_feat_length,
         'h_feats': cfg.model.h_feats,
         'mlp_dim': cfg.model.hidden_dim,
-        'n_gcn_layers': 3,
-        'n_mlp_layers': 2,
+        'n_gcn_layers': cfg.model.gnn_layers,
+        'n_mlp_layers': cfg.gnn_mlp_layers,
         'gcn_activation': F.leaky_relu
     }
     gnn = gnn_model(**gnn_params)
@@ -72,11 +72,15 @@ def main(cfg: DictConfig):
     optimizer_task = torch.optim.Adam(task_net.parameters(), lr=cfg.training.lr, weight_decay=cfg.training.weight_decay)
 
     if cfg.model.use_energy:
-        if cfg.model.shared_gnn:
-            energy_net = EnergyModelEmbeddings(n_labels=full_dataset.N_LABELS, global_dim=cfg.model.energy_global_dim, hidden_dim=cfg.model.hidden_dim, lam=cfg.model.energy_global_local)
-        else:
+        if not cfg.model.shared_gnn:
             energy_net_gnn = gnn_model(**gnn_params) 
-            energy_net = EnergyModel(n_labels=full_dataset.N_LABELS, global_dim=cfg.model.energy_global_dim, hidden_dim=cfg.model.hidden_dim, gnn=energy_net_gnn, lam=cfg.model.energy_global_local)
+        else:
+            energy_net_gnn = None
+        energy_net = EnergyModel(n_labels=full_dataset.N_LABELS,
+                                 global_dim=cfg.model.energy_global_dim,
+                                 hidden_dim=cfg.model.hidden_dim,
+                                 gnn=energy_net_gnn,
+                                 lam=cfg.model.energy_global_local)
         energy_net = energy_net.to(device)
         optimizer_energy = torch.optim.Adam(energy_net.parameters(), lr=cfg.training.lr, weight_decay=cfg.training.weight_decay)
     else:
@@ -136,12 +140,12 @@ def main(cfg: DictConfig):
             # Get predictions and embeddings
             pred, embeddings = task_net(graph, graph_feats)
             # Compute predicted energy and true energy
-            if cfg.model.use_energy and  not cfg.model.shared_gnn:
-                pred_energy = energy_net(graph, graph_feats, pred)
-                true_energy = energy_net(graph, graph_feats, labels)
+            if not cfg.model.shared_gnn:
+                energy_embeddings = energy_net.get_embeddings(graph, graph_feats)
             else:
-                pred_energy = energy_net(embeddings, pred)
-                true_energy = energy_net(embeddings, labels)
+                energy_embeddings = embeddings
+            pred_energy = energy_net.forward_embeddings(energy_embeddings, pred)
+            true_energy = energy_net.forward_embeddings(energy_embeddings, labels)
             epoch_stats['train/mean_pred_energy'] += pred_energy.mean().item()
             epoch_stats['train/mean_energy'] += true_energy.mean().item()
             epoch_stats['train/abs_energy_gap'] += abs(epoch_stats['train/mean_energy'] - epoch_stats['train/mean_pred_energy'])
@@ -198,15 +202,13 @@ def main(cfg: DictConfig):
                 graph_feats = graph.ndata['h']
                 labels = labels.float().to(device)
                 pred, embeddings = task_net(graph, graph_feats)
-                if cfg.model.use_energy and  not cfg.model.shared_gnn:
-                    pred_energy = energy_net(graph, graph_feats, pred)
-                    true_energy = energy_net(graph, graph_feats, labels)
-                    energy_net_loss = energy_loss_fcn(pred, energy_net, labels, x_graph=graph, x_feat=graph_feats).mean()
-
+                if cfg.model.use_energy and not cfg.model.shared_gnn:
+                    energy_embeddings = energy_net.get_embeddings(graph, graph_feats)
                 else:
-                    pred_energy = energy_net(embeddings, pred)
-                    true_energy = energy_net(embeddings, labels)
-                    energy_net_loss = energy_loss_fcn(pred, energy_net, labels, embeddings=embeddings).mean()
+                    energy_embeddings = embeddings
+                energy_net_loss = energy_loss_fcn(pred, energy_net, labels, embeddings=energy_embeddings).mean()
+                pred_energy = energy_net.forward_embeddings(energy_embeddings, pred)
+                true_energy = energy_net.forward_embeddings(energy_embeddings, labels)
 
                     
                 epoch_stats['val/mean_pred_energy'] += pred_energy.mean().item()
