@@ -24,19 +24,26 @@ class NCELoss(nn.Module):
         super(NCELoss, self).__init__()
         self.K = K
             
-    def forward(self, pred_probs, embeddings, energy_model, y):
+    def forward(self, pred_probs, energy_model, y, embeddings=None, x_graph=None, x_feat=None):
         '''
         Compute the NCE loss
         '''
-
-        # Compute true energy
-        energy = energy_model(embeddings, y)
+         # Compute true energy
+        if embeddings is None:
+            # Calculate embeddings
+            energy = energy_model(x_graph, x_feat, y)
+        else:
+            energy = energy_model(embeddings, y)
         # Compute the true score
         true_score = score(energy, pred_probs)
         # Get samples
         sample_scores = []
         for y_hat in sample(pred_probs, self.K):
-            sample_energy = energy_model(embeddings, y_hat)
+            if embeddings is None:
+                # TODO: maybe should compute embeddings just once if this is too slow
+                sample_energy = energy_model(x_graph, x_feat, y_hat)
+            else:
+                sample_energy = energy_model(embeddings, y_hat)
             sample_score = score(sample_energy, pred_probs)
             sample_scores.append(sample_score)
         sample_scores = torch.stack(sample_scores)

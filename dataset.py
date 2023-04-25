@@ -7,6 +7,39 @@ from dgl.data import DGLDataset
 
 import numpy as np
 import torch.nn.functional as F
+from mordred import Calculator, descriptors
+from tqdm import tqdm
+
+class LeffingwellDescriptors():
+    '''
+    A dataset of Leffingwell molecules with their descriptors and labels.
+    Used for Logistic Regression
+    '''
+    def __init__(self):
+        molecules = pyrfume.load_data('leffingwell/molecules.csv', remote=True)
+        behavior = pyrfume.load_data('leffingwell/behavior.csv', remote=True)
+
+        attribute_indices = behavior.columns[1:]
+        attributes = behavior[attribute_indices].to_numpy()
+        self.cids = behavior.index.to_numpy()
+        all_smiles =  molecules[molecules.columns[1]].to_list()
+        calc = Calculator(descriptors, ignore_3D=True)
+
+        self.descriptors = []
+        self.labels = []
+        for i in tqdm(range(len(self.cids))):
+            smiles = all_smiles[i]
+            mol = Chem.MolFromSmiles(smiles)
+            self.descriptors.append(torch.nan_to_num(torch.Tensor(calc(mol))))
+            labels = attributes[i]
+            self.labels.append(labels)
+
+
+    def __getitem__(self, i):
+        return self.descriptors[i], self.labels[i]
+
+    def __len__(self):
+        return len(self.descriptors)
 
 class LeffingwellDataset(DGLDataset):
 
@@ -16,7 +49,7 @@ class LeffingwellDataset(DGLDataset):
     N_RANDOM_FEATURES = 5
     NODE_FEAT_LENGTH = 11
     EDGE_FEAT_LENGTH = 4
-    N_LABELS = 113
+    N_LABELS = 112
 
 
     def __init__(self):
@@ -30,7 +63,7 @@ class LeffingwellDataset(DGLDataset):
         attribute_indices = behavior.columns[1:]
         attributes = behavior[attribute_indices].to_numpy()
         self.cids = behavior.index.to_numpy()
-        all_smiles = behavior[behavior.columns[0]].to_list()
+        all_smiles = molecules[molecules.columns[1]].to_list()
 
         self.graphs = []
         self.labels = []
@@ -49,7 +82,7 @@ class LeffingwellDataset(DGLDataset):
         all_nonzeros = [x.nonzero()[0] for x in all_graph_labels]
         all_label_numbers = np.concatenate(all_nonzeros)
         all_number_of_labels = [len(x) for x in all_nonzeros]
-        label_counts, _ = np.histogram(all_label_numbers, bins=113, range=(0,113))
+        label_counts, _ = np.histogram(all_label_numbers, bins=self.N_LABELS, range=(0,self.N_LABELS))
         label_weights = 1/label_counts
         label_weights = label_weights/np.sum(label_weights)
         return label_weights
