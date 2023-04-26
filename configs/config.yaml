@@ -2,6 +2,7 @@ wandb:
   project: seal_scent
   entity: danieltlevy
   mode: online
+  name: null
 
 training:
   lr: 1e-4
@@ -11,13 +12,16 @@ training:
   debug: False
   overfit: 0
   weighted_loss: True
+  save_checkpoint: True
+  early_stopping: 100
+  seed: 0
 
 model:
   h_feats: 256
   hidden_dim: 256
   K: 20
   lam: 0.01
-  shared_gnn: True
+  shared_gnn: False
   gnn_layers: 4
   gnn_mlp_layers: 2
   energy_global_dim: 256

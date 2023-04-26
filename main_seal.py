@@ -14,6 +14,15 @@ import wandb
 from torch.utils.data import DataLoader
 import hydra
 from omegaconf import DictConfig, OmegaConf
+import os
+from pathlib import Path
+import random
+
+
+def set_seed(seed):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
 
 def setup_wandb(cfg):
     config_dict = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
@@ -21,7 +30,8 @@ def setup_wandb(cfg):
              'config': config_dict,
               'settings': wandb.Settings(_disable_stats=True),
               'reinit': True,
-              'mode': cfg.wandb.mode}
+              'mode': cfg.wandb.mode,
+              'name': cfg.wandb.name}
     wandb.init(**kwargs)
     wandb.save('*.txt')
     return cfg
@@ -42,6 +52,7 @@ def make_pred(graph, model):
 @hydra.main(config_path='configs/', config_name='config')
 def main(cfg: DictConfig):
     cfg = setup_wandb(cfg)
+    set_seed(cfg.training.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
@@ -63,7 +74,7 @@ def main(cfg: DictConfig):
         'h_feats': cfg.model.h_feats,
         'mlp_dim': cfg.model.hidden_dim,
         'n_gcn_layers': cfg.model.gnn_layers,
-        'n_mlp_layers': cfg.gnn_mlp_layers,
+        'n_mlp_layers': cfg.model.gnn_mlp_layers,
         'gcn_activation': F.leaky_relu
     }
     gnn = gnn_model(**gnn_params)
@@ -95,8 +106,13 @@ def main(cfg: DictConfig):
     n_val_batches = len(val_loader)
     epoch_iter = tqdm(range(cfg.training.epochs))
 
-
+    best_val_auroc = 0
+    best_epoch = 0
     for epoch_i in epoch_iter:
+        if epoch_i - best_epoch > cfg.training.early_stopping:
+            print("Early stopping")
+            wandb.run.summary['early_stopped'] = True
+            break
         all_train_preds = []
         all_train_labels = []
 
@@ -140,7 +156,7 @@ def main(cfg: DictConfig):
             # Get predictions and embeddings
             pred, embeddings = task_net(graph, graph_feats)
             # Compute predicted energy and true energy
-            if not cfg.model.shared_gnn:
+            if cfg.model.use_energy and not cfg.model.shared_gnn:
                 energy_embeddings = energy_net.get_embeddings(graph, graph_feats)
             else:
                 energy_embeddings = embeddings
@@ -150,7 +166,7 @@ def main(cfg: DictConfig):
             epoch_stats['train/mean_energy'] += true_energy.mean().item()
             epoch_stats['train/abs_energy_gap'] += abs(epoch_stats['train/mean_energy'] - epoch_stats['train/mean_pred_energy'])
             # Compute task loss
-            task_net_loss = task_loss_fcn(pred, labels, pred_energy).mean()
+            task_net_loss = task_loss_fcn(pred, labels, pred_energy).sum() / batch_size
             task_net_loss.backward()
             epoch_stats['train/task_loss'] += task_net_loss.item()
             optimizer_task.step()
@@ -202,19 +218,19 @@ def main(cfg: DictConfig):
                 graph_feats = graph.ndata['h']
                 labels = labels.float().to(device)
                 pred, embeddings = task_net(graph, graph_feats)
-                if cfg.model.use_energy and not cfg.model.shared_gnn:
-                    energy_embeddings = energy_net.get_embeddings(graph, graph_feats)
-                else:
-                    energy_embeddings = embeddings
-                energy_net_loss = energy_loss_fcn(pred, energy_net, labels, embeddings=energy_embeddings).mean()
-                pred_energy = energy_net.forward_embeddings(energy_embeddings, pred)
-                true_energy = energy_net.forward_embeddings(energy_embeddings, labels)
+                if cfg.model.use_energy:
+                    if cfg.model.shared_gnn:
+                        energy_embeddings = energy_net.get_embeddings(graph, graph_feats)
+                    else:
+                        energy_embeddings = embeddings
+                    energy_net_loss = energy_loss_fcn(pred, energy_net, labels, embeddings=energy_embeddings).mean()
+                    pred_energy = energy_net.forward_embeddings(energy_embeddings, pred)
+                    true_energy = energy_net.forward_embeddings(energy_embeddings, labels)
 
-                    
-                epoch_stats['val/mean_pred_energy'] += pred_energy.mean().item()
-                epoch_stats['val/mean_energy'] += true_energy.mean().item()
-                epoch_stats['val/abs_energy_gap'] = abs(epoch_stats['val/mean_energy'] - epoch_stats['val/mean_pred_energy'])
-                epoch_stats['val/energy_loss'] += energy_net_loss.item()
+                    epoch_stats['val/mean_pred_energy'] += pred_energy.mean().item()
+                    epoch_stats['val/mean_energy'] += true_energy.mean().item()
+                    epoch_stats['val/abs_energy_gap'] = abs(epoch_stats['val/mean_energy'] - epoch_stats['val/mean_pred_energy'])
+                    epoch_stats['val/energy_loss'] += energy_net_loss.item()
 
                 #dataset_iter.set_postfix(loss=loss.item())
                 all_val_preds.append(pred.detach().cpu().numpy())
@@ -239,9 +255,26 @@ def main(cfg: DictConfig):
         epoch_stats['val/micro_auroc']  = torchmetrics.functional.auroc(all_val_preds_tensor, all_val_labels_tensor, task='multilabel', average='micro', num_labels=n_labels).item()
         epoch_stats['val/energy_loss'] = epoch_stats['val/energy_loss'] / n_val_batches
         epoch_stats['val/mean_energy'] = epoch_stats['val/mean_energy'] / n_val_batches
+        if epoch_stats['val/macro_auroc'] > best_val_auroc:
+            best_epoch = epoch_i
+            best_val_auroc = epoch_stats['val/macro_auroc']
+            wandb.run.summary['best_val_auroc'] = best_val_auroc
+            if cfg.training.save_checkpoint:
+                torch.save(task_net.state_dict(), os.path.join(wandb.run.dir, 'best_model.pt'))
+                torch.save(energy_net.state_dict(), os.path.join(wandb.run.dir, 'best_energy_model.pt'))
+                # Log the epoch by creating a file
+                Path(os.path.join(wandb.run.dir, 'epoch_{}.pt'.format(epoch_i))).touch()
+
 
         wandb.log(epoch_stats)
         epoch_iter.set_postfix(**epoch_stats)
+
+        # Abort if energy is too large
+        if epoch_stats['val/abs_energy_gap'] > 1e3:
+            print("Energy gap too large, aborting")
+            wandb.run.summary['energy_stopped'] = True
+            break
+
 
 if __name__ == "__main__":
     main()
